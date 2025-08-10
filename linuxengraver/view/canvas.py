@@ -20,6 +20,7 @@ class CanvasView(QGraphicsView):
         self.setRenderHints(self.renderHints())
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -36,6 +37,10 @@ class CanvasView(QGraphicsView):
         self._brush_shape = QBrush(Qt.transparent)
         self._pen_workspace = QPen(Qt.darkGray, 1, Qt.DashLine)
 
+        # Zoom state
+        self._zoom_factor = 1.0
+        self._pending_fit = False
+
     # Workspace sizing
     def set_workspace_size(self, width_mm: float, height_mm: float) -> None:
         # Map 1 mm to 1 px for now; later we can scale with DPI/zoom
@@ -51,7 +56,15 @@ class CanvasView(QGraphicsView):
         else:
             self._workspace_rect.setRect(rect)
         self._scene.setSceneRect(rect.adjusted(-50, -50, 50, 50))
-        self.fitInView(self._workspace_rect, Qt.KeepAspectRatio)
+        self._fit_workspace_when_ready()
+
+    def _fit_workspace_when_ready(self) -> None:
+        # If viewport has a size, fit now; otherwise defer to next resize/show
+        if self.viewport() and self.viewport().width() > 0 and self.viewport().height() > 0:
+            self.reset_zoom()
+            self._pending_fit = False
+        else:
+            self._pending_fit = True
 
     # Tools
     def set_tool(self, tool: str) -> None:
@@ -96,6 +109,37 @@ class CanvasView(QGraphicsView):
                 r = rect.width() / 2
                 out.append(CircleSpec(cx=cx, cy=cy, r=r))
         return out
+
+    # Selection helpers
+    def delete_selection(self) -> None:
+        for item in list(self._scene.selectedItems()):
+            if item is self._workspace_rect:
+                continue
+            self._scene.removeItem(item)
+
+    def select_all(self) -> None:
+        for item in self._scene.items():
+            if item is self._workspace_rect:
+                continue
+            item.setSelected(True)
+
+    # Zoom helpers
+    def zoom(self, factor: float) -> None:
+        self._zoom_factor *= factor
+        self.scale(factor, factor)
+
+    def zoom_in(self) -> None:
+        self.zoom(1.2)
+
+    def zoom_out(self) -> None:
+        self.zoom(1/1.2)
+
+    def reset_zoom(self) -> None:
+        if self._workspace_rect is not None:
+            # Reset the view transform to identity
+            self.resetTransform()
+            self._zoom_factor = 1.0
+            self.fitInView(self._workspace_rect, Qt.KeepAspectRatio)
 
     # Mouse events for drawing tools
     def mousePressEvent(self, event):  # noqa: N802
@@ -153,3 +197,35 @@ class CanvasView(QGraphicsView):
             self._scene.removeItem(self._preview_item)
             self._preview_item = None
             self._drag_start = None
+
+    # Keyboard shortcuts
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key_Delete:
+            self.delete_selection()
+            event.accept()
+            return
+        if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.select_all()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    # Mouse wheel to zoom
+    def wheelEvent(self, event):  # noqa: N802
+        # Always zoom with wheel; positive delta zooms in, negative zooms out
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x()
+        factor = 1.2 if delta > 0 else 1/1.2
+        self.zoom(factor)
+        event.accept()
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        if self._pending_fit:
+            self._fit_workspace_when_ready()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        if self._pending_fit:
+            self._fit_workspace_when_ready()
